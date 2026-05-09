@@ -5,7 +5,7 @@ use crate::{
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -76,7 +76,12 @@ impl Config {
 
     pub fn load() -> ResipResult<Self> {
         let path = Self::path()?;
-        let contents = fs::read_to_string(&path).map_err(|source| ResipError::ReadFile {
+        Self::load_from_path(&path)
+    }
+
+    // Explicit paths keep tests away from the user's real config directory.
+    pub fn load_from_path(path: &Path) -> ResipResult<Self> {
+        let contents = fs::read_to_string(path).map_err(|source| ResipError::ReadFile {
             path: path.display().to_string(),
             source,
         })?;
@@ -88,6 +93,11 @@ impl Config {
 
     pub fn save(&self) -> ResipResult<()> {
         let path = Self::path()?;
+        self.save_to_path(&path)
+    }
+
+    // This mirrors `save`, but lets tests use a temporary config file.
+    pub fn save_to_path(&self, path: &Path) -> ResipResult<()> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|source| ResipError::CreateDirectory {
                 path: parent.display().to_string(),
@@ -95,7 +105,7 @@ impl Config {
             })?;
         }
         let contents = serde_json::to_string_pretty(self).map_err(ResipError::SerializeJson)?;
-        fs::write(&path, contents).map_err(|source| ResipError::WriteFile {
+        fs::write(path, contents).map_err(|source| ResipError::WriteFile {
             path: path.display().to_string(),
             source,
         })

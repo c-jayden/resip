@@ -19,7 +19,7 @@ struct ClashConfig {
     proxy_groups: Vec<ProxyGroup>,
     rules: Vec<String>,
     #[serde(flatten)]
-    extra: BTreeMap<String, serde_yaml::Value>,
+    extra: BTreeMap<String, serde_yml::Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -49,6 +49,7 @@ pub fn generate(config: &Config) -> ResipResult<PathBuf> {
     }
 
     let proxy_name = config.name.clone();
+    // The local Clash profile has one job: send all traffic to the SSH tunnel.
     let clash = ClashConfig {
         port: config.local_clash_port,
         allow_lan: false,
@@ -68,7 +69,7 @@ pub fn generate(config: &Config) -> ResipResult<PathBuf> {
         extra: BTreeMap::new(),
     };
 
-    let contents = serde_yaml::to_string(&clash).map_err(ResipError::SerializeYaml)?;
+    let contents = serde_yml::to_string(&clash).map_err(ResipError::SerializeYaml)?;
     fs::write(&path, contents).map_err(|source| ResipError::WriteFile {
         path: path.display().to_string(),
         source,

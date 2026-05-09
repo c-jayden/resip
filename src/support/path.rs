@@ -1,61 +1,7 @@
 use crate::error::{ResipError, ResipResult};
 use std::env;
-use std::io::{self, Write};
-use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-
-pub fn prompt_required(label: &str) -> ResipResult<String> {
-    loop {
-        print!("{label}: ");
-        io::stdout().flush().map_err(ResipError::FlushStdout)?;
-        let mut input = String::new();
-        io::stdin()
-            .read_line(&mut input)
-            .map_err(ResipError::ReadStdin)?;
-        let value = input.trim();
-        if !value.is_empty() {
-            return Ok(value.to_string());
-        }
-        eprintln!("{label} is required.");
-    }
-}
-
-pub fn prompt_default(label: &str, default: &str) -> ResipResult<String> {
-    print!("{label} [{default}]: ");
-    io::stdout().flush().map_err(ResipError::FlushStdout)?;
-    let mut input = String::new();
-    io::stdin()
-        .read_line(&mut input)
-        .map_err(ResipError::ReadStdin)?;
-    let value = input.trim();
-    if value.is_empty() {
-        Ok(default.to_string())
-    } else {
-        Ok(value.to_string())
-    }
-}
-
-pub fn prompt_yes_no(label: &str, default: bool) -> ResipResult<bool> {
-    let suffix = if default { "Y/n" } else { "y/N" };
-    loop {
-        print!("{label} [{suffix}]: ");
-        io::stdout().flush().map_err(ResipError::FlushStdout)?;
-        let mut input = String::new();
-        io::stdin()
-            .read_line(&mut input)
-            .map_err(ResipError::ReadStdin)?;
-        let value = input.trim().to_lowercase();
-        if value.is_empty() {
-            return Ok(default);
-        }
-        match value.as_str() {
-            "y" | "yes" => return Ok(true),
-            "n" | "no" => return Ok(false),
-            _ => eprintln!("Please answer y or n."),
-        }
-    }
-}
 
 pub fn expand_tilde(path: &str) -> ResipResult<PathBuf> {
     if path == "~" {
@@ -171,6 +117,12 @@ pub fn open_path_dir(path: &Path) -> ResipResult<PathBuf> {
     Ok(opened_dir)
 }
 
+pub fn home_dir() -> ResipResult<PathBuf> {
+    directories::UserDirs::new()
+        .map(|dirs| dirs.home_dir().to_path_buf())
+        .ok_or(ResipError::HomeDirUnavailable)
+}
+
 fn absolute_dir(dir: &Path) -> ResipResult<PathBuf> {
     if dir.is_absolute() {
         return Ok(dir.to_path_buf());
@@ -182,6 +134,7 @@ fn absolute_dir(dir: &Path) -> ResipResult<PathBuf> {
 }
 
 fn sanitize_file_stem(value: &str) -> String {
+    // Keep generated file names simple and portable across common file systems.
     let mut sanitized = String::new();
 
     for character in value.to_lowercase().chars() {
@@ -200,35 +153,25 @@ fn sanitize_file_stem(value: &str) -> String {
     }
 }
 
-pub fn home_dir() -> ResipResult<PathBuf> {
-    directories::UserDirs::new()
-        .map(|dirs| dirs.home_dir().to_path_buf())
-        .ok_or(ResipError::HomeDirUnavailable)
-}
+#[cfg(test)]
+mod tests {
+    use super::{expand_tilde, sanitize_file_stem};
 
-pub fn is_port_available(host: &str, port: u16) -> bool {
-    TcpListener::bind((host, port)).is_ok()
-}
+    #[test]
+    fn sanitize_file_stem_keeps_safe_ascii() {
+        assert_eq!(sanitize_file_stem("Resip Server_01"), "resip-server_01");
+    }
 
-pub fn command_exists(name: &str) -> bool {
-    let Some(paths) = env::var_os("PATH") else {
-        return false;
-    };
+    #[test]
+    fn sanitize_file_stem_falls_back_for_empty_result() {
+        assert_eq!(sanitize_file_stem("中文 🚀"), "server");
+    }
 
-    let candidates = if cfg!(windows) {
-        vec![
-            format!("{name}.exe"),
-            format!("{name}.cmd"),
-            format!("{name}.bat"),
-            name.to_string(),
-        ]
-    } else {
-        vec![name.to_string()]
-    };
-
-    env::split_paths(&paths).any(|dir| {
-        candidates
-            .iter()
-            .any(|candidate| dir.join(candidate).is_file())
-    })
+    #[test]
+    fn expand_tilde_leaves_non_tilde_paths_unchanged() {
+        assert_eq!(
+            expand_tilde("relative/file").unwrap(),
+            std::path::PathBuf::from("relative/file")
+        );
+    }
 }

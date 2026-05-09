@@ -56,7 +56,7 @@ pub enum ResipError {
     SerializeJson(#[source] serde_json::Error),
 
     #[error("failed to serialize Clash YAML")]
-    SerializeYaml(#[source] serde_yaml::Error),
+    SerializeYaml(#[source] serde_yml::Error),
 
     #[error("ssh was not found in PATH")]
     SshNotFound,

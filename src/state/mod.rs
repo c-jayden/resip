@@ -11,6 +11,7 @@ pub struct State {
     pub local_tunnel_host: String,
     pub local_tunnel_port: u16,
     pub server: String,
+    // These fields were added after v0.1. Missing values mean "old state file".
     #[serde(default)]
     pub forward: Option<String>,
     #[serde(default)]

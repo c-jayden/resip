@@ -77,13 +77,13 @@ pub fn collapse_home(path: &str) -> ResipResult<String> {
     let expanded = PathBuf::from(path);
     let home = home_dir()?;
 
-    if expanded.is_absolute() {
-        if let Ok(rest) = expanded.strip_prefix(&home) {
-            if rest.as_os_str().is_empty() {
-                return Ok("~".to_string());
-            }
-            return Ok(format!("~/{}", rest.to_string_lossy().replace('\\', "/")));
+    if expanded.is_absolute()
+        && let Ok(rest) = expanded.strip_prefix(&home)
+    {
+        if rest.as_os_str().is_empty() {
+            return Ok("~".to_string());
         }
+        return Ok(format!("~/{}", rest.to_string_lossy().replace('\\', "/")));
     }
 
     Ok(path.to_string())

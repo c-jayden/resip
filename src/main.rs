@@ -188,8 +188,15 @@ fn status() -> Result<()> {
     };
 
     if let Some(current) = state::State::load_optional()? {
-        let running = tunnel::is_pid_running(current.pid);
-        println!("Tunnel: {}", if running { "running" } else { "stale" });
+        let status = tunnel::state_process_status(&current);
+        println!(
+            "Tunnel: {}",
+            match status {
+                tunnel::TunnelProcessStatus::Running => "running",
+                tunnel::TunnelProcessStatus::NotRunning => "stale",
+                tunnel::TunnelProcessStatus::UnexpectedProcess => "stale (PID reused)",
+            }
+        );
         println!("PID: {}", current.pid);
         println!("Started at: {}", current.started_at);
         if let Some(config) = &config {
@@ -239,10 +246,10 @@ fn test() -> Result<()> {
     match result {
         Ok(json) => {
             for key in ["ip", "city", "region", "country", "org"] {
-                let value = match json.get(key).and_then(serde_json::Value::as_str) {
-                    Some(value) => value,
-                    None => "-",
-                };
+                let value = json
+                    .get(key)
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("-");
                 println!("{key}: {value}");
             }
             Ok(())

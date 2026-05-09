@@ -11,6 +11,10 @@ pub struct State {
     pub local_tunnel_host: String,
     pub local_tunnel_port: u16,
     pub server: String,
+    #[serde(default)]
+    pub forward: Option<String>,
+    #[serde(default)]
+    pub destination: Option<String>,
 }
 
 impl State {
@@ -59,5 +63,27 @@ impl State {
             })?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::State;
+
+    #[test]
+    fn loads_state_written_by_older_versions() {
+        let json = r#"{
+            "pid": 123,
+            "started_at": "2026-05-10T00:00:00Z",
+            "local_tunnel_host": "127.0.0.1",
+            "local_tunnel_port": 7891,
+            "server": "ubuntu@example.com:22"
+        }"#;
+
+        let state: State = serde_json::from_str(json).unwrap();
+
+        assert_eq!(state.pid, 123);
+        assert_eq!(state.forward, None);
+        assert_eq!(state.destination, None);
     }
 }

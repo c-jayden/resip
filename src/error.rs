@@ -67,6 +67,12 @@ pub enum ResipError {
     #[error("failed to start ssh tunnel")]
     StartSsh(#[source] std::io::Error),
 
+    #[error("ssh tunnel exited immediately: {reason}")]
+    SshExitedImmediately { reason: String },
+
+    #[error("ssh tunnel started, but local forward did not become active: {host}:{port}")]
+    SshForwardNotReady { host: String, port: u16 },
+
     #[error("failed to run command: {program}")]
     RunCommand {
         program: &'static str,

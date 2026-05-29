@@ -16,6 +16,8 @@ pub struct State {
     pub forward: Option<String>,
     #[serde(default)]
     pub destination: Option<String>,
+    #[serde(default)]
+    pub supervisor_pid: Option<u32>,
 }
 
 impl State {
@@ -86,5 +88,26 @@ mod tests {
         assert_eq!(state.pid, 123);
         assert_eq!(state.forward, None);
         assert_eq!(state.destination, None);
+        assert_eq!(state.supervisor_pid, None);
+    }
+
+    #[test]
+    fn serializes_supervisor_pid_when_present() {
+        let state = State {
+            pid: 456,
+            started_at: "2026-05-29T00:00:00Z".to_string(),
+            local_tunnel_host: "127.0.0.1".to_string(),
+            local_tunnel_port: 7891,
+            server: "ubuntu@example.com:22".to_string(),
+            forward: Some("127.0.0.1:7891:127.0.0.1:7890".to_string()),
+            destination: Some("ubuntu@example.com".to_string()),
+            supervisor_pid: Some(789),
+        };
+
+        let json = serde_json::to_string(&state).unwrap();
+        let loaded: State = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(loaded.pid, 456);
+        assert_eq!(loaded.supervisor_pid, Some(789));
     }
 }

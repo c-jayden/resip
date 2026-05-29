@@ -90,8 +90,40 @@ resip off           # stop SSH tunnel
 resip status        # show config path, state, PID, ports, server
 resip test          # request https://ipinfo.io/json through local Clash
 resip ssh           # print equivalent ssh command
+resip autostart enable   # start automatically when the current user logs in
+resip autostart disable  # remove current-user autostart
+resip autostart status   # show current-user autostart status
 resip setup         # init + gen
 ```
+
+## Long-running tunnel
+
+`resip on` starts a small background supervisor. The supervisor starts the SSH
+tunnel and restarts it if SSH exits because of an idle timeout, network switch,
+or temporary server-side disconnect. `resip off` stops both the supervisor and
+the current SSH process.
+
+The SSH command also enables client-side keepalive:
+
+```text
+ServerAliveInterval=30
+ServerAliveCountMax=3
+```
+
+This helps SSH detect broken idle connections quickly. The supervisor handles
+the next step: reconnecting until you run `resip off`.
+
+## Autostart
+
+`resip autostart enable` registers `resip on` for the current user only:
+
+- macOS: writes `~/Library/LaunchAgents/com.resip.tunnel.plist`
+- Windows: writes the `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`
+  value `resip`
+- Linux: writes `~/.config/systemd/user/resip.service` and enables it with
+  `systemctl --user`
+
+No administrator/root permission is required by design.
 
 ## Security Notes
 

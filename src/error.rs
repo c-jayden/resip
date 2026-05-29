@@ -86,6 +86,18 @@ pub enum ResipError {
     #[error("failed to get current directory")]
     CurrentDir(#[source] std::io::Error),
 
+    #[error("failed to get current executable path")]
+    CurrentExe(#[source] std::io::Error),
+
+    #[error("failed to start tunnel supervisor")]
+    StartSupervisor(#[source] std::io::Error),
+
+    #[error("tunnel supervisor exited before the SSH tunnel became active")]
+    SupervisorExitedImmediately,
+
+    #[error("autostart is not supported on this platform")]
+    UnsupportedAutostartPlatform,
+
     #[error("failed to open directory: {path}")]
     OpenDirectory {
         path: String,

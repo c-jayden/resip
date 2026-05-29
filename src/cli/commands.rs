@@ -1,6 +1,6 @@
 use crate::config::Config;
 use crate::error::ResipError;
-use crate::{clash, process, state, tunnel, utils};
+use crate::{autostart, clash, process, state, tunnel, utils};
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
@@ -60,6 +60,24 @@ enum Commands {
         #[arg(long)]
         output: Option<String>,
     },
+    /// Manage login/startup integration for the current user.
+    Autostart {
+        #[command(subcommand)]
+        command: AutostartCommands,
+    },
+    /// Internal command used by the background tunnel supervisor.
+    #[command(hide = true)]
+    Supervisor,
+}
+
+#[derive(Subcommand)]
+enum AutostartCommands {
+    /// Start `resip on` automatically when the current user logs in.
+    Enable,
+    /// Remove the current user's autostart entry.
+    Disable,
+    /// Show whether autostart is configured.
+    Status,
 }
 
 pub fn run() -> Result<()> {
@@ -117,7 +135,26 @@ fn run_cli(cli: Cli) -> Result<()> {
             print_generated_clash_config(&path);
             Ok(())
         }
+        Commands::Autostart { command } => autostart_command(command),
+        Commands::Supervisor => {
+            tunnel::run_supervisor()?;
+            Ok(())
+        }
     }
+}
+
+fn autostart_command(command: AutostartCommands) -> Result<()> {
+    let info = match command {
+        AutostartCommands::Enable => autostart::enable()?,
+        AutostartCommands::Disable => autostart::disable()?,
+        AutostartCommands::Status => autostart::status()?,
+    };
+    println!(
+        "Autostart: {}",
+        if info.enabled { "enabled" } else { "disabled" }
+    );
+    println!("Target: {}", info.target);
+    Ok(())
 }
 
 fn init(server_ip: Option<String>, force: bool, output: Option<String>) -> Result<()> {
@@ -186,15 +223,21 @@ fn status() -> Result<()> {
     };
 
     if let Some(current) = state::State::load_optional()? {
-        let status = process::state_process_status(&current);
+        let ssh_status = process::state_process_status(&current);
+        let supervisor_running = current.supervisor_pid.is_some_and(process::is_pid_running);
         println!(
             "Tunnel: {}",
-            match status {
-                process::TunnelProcessStatus::Running => "running",
-                process::TunnelProcessStatus::NotRunning => "stale",
-                process::TunnelProcessStatus::UnexpectedProcess => "stale (PID reused)",
+            match (supervisor_running, ssh_status) {
+                (true, process::TunnelProcessStatus::Running) => "running",
+                (true, _) => "reconnecting",
+                (false, process::TunnelProcessStatus::Running) => "running (legacy)",
+                (false, process::TunnelProcessStatus::NotRunning) => "stale",
+                (false, process::TunnelProcessStatus::UnexpectedProcess) => "stale (PID reused)",
             }
         );
+        if let Some(supervisor_pid) = current.supervisor_pid {
+            println!("Supervisor PID: {supervisor_pid}");
+        }
         println!("PID: {}", current.pid);
         println!("Started at: {}", current.started_at);
         if let Some(config) = &config {

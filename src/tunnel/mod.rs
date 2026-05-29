@@ -2,6 +2,7 @@ use crate::config::Config;
 use crate::error::{ResipError, ResipResult};
 use crate::state::State;
 use crate::utils;
+use std::env;
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -12,36 +13,31 @@ use process::TunnelProcessStatus;
 
 const FORWARD_READY_TIMEOUT: Duration = Duration::from_secs(15);
 const FORWARD_READY_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const RECONNECT_DELAY: Duration = Duration::from_secs(5);
 
 pub fn start(config: &Config, force: bool) -> ResipResult<()> {
     if let Some(existing) = State::load_optional()? {
-        match process::state_process_status(&existing) {
-            TunnelProcessStatus::Running => {
-                if !force {
-                    println!("Tunnel is already running: PID {}", existing.pid);
-                    print_tunnel_details(config, None);
-                    let restart = utils::prompt_yes_no("Restart the existing tunnel now?", false)?;
-                    if !restart {
-                        println!("Kept existing SSH tunnel: PID {}", existing.pid);
-                        return Ok(());
-                    }
+        if is_supervisor_running(&existing)
+            || matches!(
+                process::state_process_status(&existing),
+                TunnelProcessStatus::Running
+            )
+        {
+            if !force {
+                println!("Tunnel is already managed.");
+                print_state_details(&existing);
+                print_tunnel_details(config, None);
+                let restart = utils::prompt_yes_no("Restart the existing tunnel now?", false)?;
+                if !restart {
+                    println!("Kept existing tunnel.");
+                    return Ok(());
                 }
-                stop()?;
             }
-            TunnelProcessStatus::NotRunning => {
-                println!(
-                    "Tunnel state was stale: PID {} is not running.",
-                    existing.pid
-                );
-                State::remove()?;
-            }
-            TunnelProcessStatus::UnexpectedProcess => {
-                println!(
-                    "Tunnel state was stale: PID {} no longer matches the expected SSH tunnel.",
-                    existing.pid
-                );
-                State::remove()?;
-            }
+            stop()?;
+        } else {
+            println!("Tunnel state was stale.");
+            print_state_details(&existing);
+            State::remove()?;
         }
     }
 
@@ -56,50 +52,15 @@ pub fn start(config: &Config, force: bool) -> ResipResult<()> {
         });
     }
 
-    let identity_file = utils::expand_tilde(&config.identity_file)?;
-    let forward = format!(
-        "{}:{}:{}:{}",
-        config.local_tunnel_host,
-        config.local_tunnel_port,
-        config.remote_proxy_host,
-        config.remote_proxy_port
-    );
-    let destination = format!("{}@{}", config.ssh_user, config.ssh_host);
+    let supervisor_pid = spawn_supervisor()?;
+    wait_for_supervised_forward(config, supervisor_pid)?;
 
-    let identity_arg = identity_file.to_string_lossy();
-    let args = ssh_args(config, &identity_arg, &forward, &destination);
-
-    // SSH stays in the foreground from its own point of view. We detach it
-    // from this CLI by closing all standard streams and keeping only the PID.
-    let mut child = Command::new("ssh")
-        .args(&args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(ResipError::StartSsh)?;
-
-    wait_for_forward(
-        &mut child,
-        &config.local_tunnel_host,
-        config.local_tunnel_port,
-    )?;
-
-    let state = State {
-        pid: child.id(),
-        started_at: process::current_timestamp()?,
-        local_tunnel_host: config.local_tunnel_host.clone(),
-        local_tunnel_port: config.local_tunnel_port,
-        server: format!(
-            "{}@{}:{}",
-            config.ssh_user, config.ssh_host, config.ssh_port
-        ),
-        forward: Some(forward),
-        destination: Some(destination),
-    };
-    state.save()?;
-
-    println!("Started SSH tunnel: PID {}", state.pid);
+    let state = State::load_optional()?.ok_or(ResipError::SshForwardNotReady {
+        host: config.local_tunnel_host.clone(),
+        port: config.local_tunnel_port,
+    })?;
+    println!("Started SSH tunnel supervisor: PID {supervisor_pid}");
+    println!("SSH tunnel: PID {}", state.pid);
     print_tunnel_details(config, None);
     Ok(())
 }
@@ -109,6 +70,13 @@ pub fn stop() -> ResipResult<()> {
         println!("Tunnel is not running.");
         return Ok(());
     };
+
+    if let Some(supervisor_pid) = state.supervisor_pid
+        && process::is_pid_running(supervisor_pid)
+    {
+        process::kill_pid(supervisor_pid)?;
+        println!("Stopped tunnel supervisor: PID {supervisor_pid}");
+    }
 
     match process::state_process_status(&state) {
         TunnelProcessStatus::Running => {
@@ -130,6 +98,32 @@ pub fn stop() -> ResipResult<()> {
     Ok(())
 }
 
+pub fn run_supervisor() -> ResipResult<()> {
+    let config = Config::load()?;
+    let supervisor_pid = std::process::id();
+
+    loop {
+        match start_ssh_once(&config, Some(supervisor_pid)) {
+            Ok(mut child) => {
+                let ssh_pid = child.id();
+                let _ = child.wait();
+
+                let Some(state) = State::load_optional()? else {
+                    return Ok(());
+                };
+                if state.supervisor_pid != Some(supervisor_pid) || state.pid != ssh_pid {
+                    return Ok(());
+                }
+            }
+            Err(error) => {
+                eprintln!("resip supervisor: {error}");
+            }
+        }
+
+        thread::sleep(RECONNECT_DELAY);
+    }
+}
+
 pub fn ssh_command_string(config: &Config) -> String {
     let forward = format!(
         "{}:{}:{}:{}",
@@ -138,10 +132,9 @@ pub fn ssh_command_string(config: &Config) -> String {
         config.remote_proxy_host,
         config.remote_proxy_port
     );
-    format!(
-        "ssh -i {} -p {} -o ExitOnForwardFailure=yes -o BatchMode=yes -o ConnectTimeout=10 -N -L {} {}@{}",
-        config.identity_file, config.ssh_port, forward, config.ssh_user, config.ssh_host
-    )
+    let destination = format!("{}@{}", config.ssh_user, config.ssh_host);
+    let args = ssh_args(config, &config.identity_file, &forward, &destination);
+    format!("ssh {}", args.join(" "))
 }
 
 pub fn print_tunnel_details(config: &Config, pid: Option<u32>) {
@@ -174,12 +167,165 @@ fn ssh_args(config: &Config, identity_file: &str, forward: &str, destination: &s
         "BatchMode=yes".to_string(),
         "-o".to_string(),
         "ConnectTimeout=10".to_string(),
+        "-o".to_string(),
+        "ServerAliveInterval=30".to_string(),
+        "-o".to_string(),
+        "ServerAliveCountMax=3".to_string(),
         "-N".to_string(),
         "-L".to_string(),
         forward.to_string(),
         destination.to_string(),
     ]
 }
+
+fn start_ssh_once(
+    config: &Config,
+    supervisor_pid: Option<u32>,
+) -> ResipResult<std::process::Child> {
+    if !utils::is_port_available(&config.local_tunnel_host, config.local_tunnel_port) {
+        return Err(ResipError::PortInUse {
+            host: config.local_tunnel_host.clone(),
+            port: config.local_tunnel_port,
+        });
+    }
+
+    let identity_file = utils::expand_tilde(&config.identity_file)?;
+    let forward = forward_spec(config);
+    let destination = destination(config);
+    let identity_arg = identity_file.to_string_lossy();
+    let args = ssh_args(config, &identity_arg, &forward, &destination);
+
+    let mut child = spawn_ssh(&args)?;
+    wait_for_forward(
+        &mut child,
+        &config.local_tunnel_host,
+        config.local_tunnel_port,
+    )?;
+
+    save_running_state(config, child.id(), forward, destination, supervisor_pid)?;
+    Ok(child)
+}
+
+fn spawn_ssh(args: &[String]) -> ResipResult<std::process::Child> {
+    // SSH stays in the foreground from its own point of view. We detach it
+    // from this CLI by closing all standard streams and keeping only the PID.
+    Command::new("ssh")
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(ResipError::StartSsh)
+}
+
+fn save_running_state(
+    config: &Config,
+    ssh_pid: u32,
+    forward: String,
+    destination: String,
+    supervisor_pid: Option<u32>,
+) -> ResipResult<()> {
+    let state = State {
+        pid: ssh_pid,
+        started_at: process::current_timestamp()?,
+        local_tunnel_host: config.local_tunnel_host.clone(),
+        local_tunnel_port: config.local_tunnel_port,
+        server: format!(
+            "{}@{}:{}",
+            config.ssh_user, config.ssh_host, config.ssh_port
+        ),
+        forward: Some(forward),
+        destination: Some(destination),
+        supervisor_pid,
+    };
+    state.save()
+}
+
+fn spawn_supervisor() -> ResipResult<u32> {
+    let executable = env::current_exe().map_err(ResipError::CurrentExe)?;
+    let mut command = Command::new(executable);
+    command
+        .arg("supervisor")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    detach_command(&mut command);
+    let child = command.spawn().map_err(ResipError::StartSupervisor)?;
+    Ok(child.id())
+}
+
+fn wait_for_supervised_forward(config: &Config, supervisor_pid: u32) -> ResipResult<()> {
+    let deadline = Instant::now() + FORWARD_READY_TIMEOUT;
+    while Instant::now() < deadline {
+        if !process::is_pid_running(supervisor_pid) {
+            return Err(ResipError::SupervisorExitedImmediately);
+        }
+
+        if let Some(state) = State::load_optional()?
+            && state.supervisor_pid == Some(supervisor_pid)
+            && matches!(
+                process::state_process_status(&state),
+                TunnelProcessStatus::Running
+            )
+        {
+            return Ok(());
+        }
+
+        thread::sleep(FORWARD_READY_POLL_INTERVAL);
+    }
+
+    let _ = process::kill_pid(supervisor_pid);
+    Err(ResipError::SshForwardNotReady {
+        host: config.local_tunnel_host.clone(),
+        port: config.local_tunnel_port,
+    })
+}
+
+fn is_supervisor_running(state: &State) -> bool {
+    state.supervisor_pid.is_some_and(process::is_pid_running)
+}
+
+fn print_state_details(state: &State) {
+    if let Some(supervisor_pid) = state.supervisor_pid {
+        println!("Supervisor PID: {supervisor_pid}");
+    }
+    println!("SSH PID: {}", state.pid);
+}
+
+fn forward_spec(config: &Config) -> String {
+    format!(
+        "{}:{}:{}:{}",
+        config.local_tunnel_host,
+        config.local_tunnel_port,
+        config.remote_proxy_host,
+        config.remote_proxy_port
+    )
+}
+
+fn destination(config: &Config) -> String {
+    format!("{}@{}", config.ssh_user, config.ssh_host)
+}
+
+#[cfg(windows)]
+fn detach_command(command: &mut Command) {
+    use std::os::windows::process::CommandExt;
+
+    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+    const DETACHED_PROCESS: u32 = 0x0000_0008;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+    command.creation_flags(CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS | CREATE_NO_WINDOW);
+}
+
+#[cfg(unix)]
+fn detach_command(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+
+    command.process_group(0);
+}
+
+#[cfg(not(any(unix, windows)))]
+fn detach_command(_command: &mut Command) {}
 
 fn wait_for_forward(
     child: &mut std::process::Child,
@@ -215,10 +361,30 @@ fn wait_for_forward(
 
 #[cfg(test)]
 mod tests {
-    use super::wait_for_forward;
+    use super::{ssh_args, wait_for_forward};
+    use crate::config::Config;
     use std::net::TcpListener;
     use std::process::{Command, Stdio};
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn ssh_args_enable_client_keepalive() {
+        let args = ssh_args(
+            &Config::default(),
+            "/Users/me/.ssh/id_rsa",
+            "127.0.0.1:7891:127.0.0.1:7890",
+            "ubuntu@example.com",
+        );
+
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["-o", "ServerAliveInterval=30"])
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["-o", "ServerAliveCountMax=3"])
+        );
+    }
 
     #[test]
     fn wait_for_forward_allows_slow_ssh_startup() {

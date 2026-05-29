@@ -88,6 +88,7 @@ fn help_lists_primary_commands() {
     assert!(stdout.contains("Usage: resip <COMMAND>"));
     assert!(stdout.contains("init"));
     assert!(stdout.contains("gen"));
+    assert!(stdout.contains("autostart"));
     assert!(stdout.contains("status"));
 }
 

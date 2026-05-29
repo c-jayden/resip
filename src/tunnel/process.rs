@@ -1,6 +1,6 @@
 use crate::error::{ResipError, ResipResult};
 use crate::state::State;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 pub enum TunnelProcessStatus {
     Running,
@@ -30,6 +30,7 @@ pub fn is_pid_running(pid: u32) -> bool {
         Command::new("kill")
             .arg("-0")
             .arg(pid.to_string())
+            .stderr(Stdio::null())
             .status()
             .is_ok_and(|status| status.success())
     }
@@ -170,6 +171,7 @@ mod tests {
             server: "ubuntu@example.com:22".to_string(),
             forward: Some("127.0.0.1:7891:127.0.0.1:7890".to_string()),
             destination: Some("ubuntu@example.com".to_string()),
+            supervisor_pid: None,
         }
     }
 

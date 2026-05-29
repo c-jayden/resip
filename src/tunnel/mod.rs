@@ -4,11 +4,14 @@ use crate::state::State;
 use crate::utils;
 use std::process::{Command, Stdio};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub mod process;
 
 use process::TunnelProcessStatus;
+
+const FORWARD_READY_TIMEOUT: Duration = Duration::from_secs(15);
+const FORWARD_READY_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 pub fn start(config: &Config, force: bool) -> ResipResult<()> {
     if let Some(existing) = State::load_optional()? {
@@ -185,7 +188,8 @@ fn wait_for_forward(
 ) -> ResipResult<()> {
     // A spawned SSH process can still fail a moment later. Wait until it
     // actually owns the local forwarding port before writing state.
-    for _ in 0..20 {
+    let deadline = Instant::now() + FORWARD_READY_TIMEOUT;
+    while Instant::now() < deadline {
         if let Some(status) = child.try_wait().map_err(ResipError::StartSsh)? {
             return Err(ResipError::SshExitedImmediately {
                 reason: status.to_string(),
@@ -196,7 +200,7 @@ fn wait_for_forward(
             return Ok(());
         }
 
-        thread::sleep(Duration::from_millis(100));
+        thread::sleep(FORWARD_READY_POLL_INTERVAL);
     }
 
     Err(ResipError::SshForwardNotReady {
@@ -207,4 +211,66 @@ fn wait_for_forward(
         let _ = child.kill();
         let _ = child.wait();
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::wait_for_forward;
+    use std::net::TcpListener;
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn wait_for_forward_allows_slow_ssh_startup() {
+        if Command::new("python3")
+            .arg("--version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_err()
+        {
+            eprintln!("skipping test because python3 is not available");
+            return;
+        }
+
+        let port = unused_local_port();
+        let script = format!(
+            r#"
+import socket
+import time
+
+time.sleep(3)
+listener = socket.socket()
+listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+listener.bind(("127.0.0.1", {port}))
+listener.listen(1)
+time.sleep(2)
+"#
+        );
+
+        let mut child = Command::new("python3")
+            .arg("-c")
+            .arg(script)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+
+        let started = Instant::now();
+        let result = wait_for_forward(&mut child, "127.0.0.1", port);
+        let _ = child.kill();
+        let _ = child.wait();
+
+        assert!(
+            result.is_ok(),
+            "expected delayed listener to become ready, got {result:?}"
+        );
+        assert!(started.elapsed() >= Duration::from_secs(3));
+    }
+
+    fn unused_local_port() -> u16 {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        listener.local_addr().unwrap().port()
+    }
 }
